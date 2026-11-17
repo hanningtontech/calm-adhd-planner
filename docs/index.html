@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#f7f5f3" />
+    <meta name="description" content="A calm, flexible planner for choosing one useful next step at a time." />
+    <title>The Calm ADHD Planner</title>
+    <link rel="icon" href="./favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="./styles.css" />
+    <script type="module" src="./app.js"></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#mainContent">Skip to planner</a>
+    <div class="app-shell">
+      <aside class="sidebar" aria-label="Planner navigation">
+        <a class="brand" href="#/overview" aria-label="The Calm ADHD Planner overview">
+          <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+          <span class="brand-copy"><strong>The Calm ADHD Planner</strong><small>Room to begin again</small></span>
+        </a>
+        <nav id="sidebarNav" class="sidebar-nav" aria-label="Planner sections"></nav>
+        <div class="sidebar-note">
+          <span class="note-kicker">A gentle reminder</span>
+          <p>Use what helps. Leave the rest blank.</p>
+        </div>
+      </aside>
+
+      <div class="workspace">
+        <header class="topbar">
+          <div class="mobile-brand">
+            <a class="brand compact" href="#/overview" aria-label="Go to overview">
+              <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+              <span class="brand-copy"><strong>Calm Planner</strong></span>
+            </a>
+            <label class="sr-only" for="mobileNav">Choose a planner section</label>
+            <select id="mobileNav" class="mobile-nav" aria-label="Choose a planner section"></select>
+          </div>
+          <div class="topbar-date"><span class="status-dot" aria-hidden="true"></span><span id="todayLabel"></span></div>
+          <div class="topbar-actions">
+            <span id="saveStatus" class="save-status" role="status" aria-live="polite">Saved on this device</span>
+            <button id="exportButton" class="button button-quiet" type="button">Download backup</button>
+            <button id="importButton" class="button button-outline" type="button">Restore backup</button>
+            <input id="importFile" class="sr-only" type="file" accept="application/json,.json" />
+          </div>
+        </header>
+
+        <main id="mainContent" class="main-content" tabindex="-1">
+          <div id="appContent" aria-live="polite" aria-busy="true">
+            <p class="loading-message">Opening your planner…</p>
+          </div>
+        </main>
+        <footer class="app-footer">
+          <span>Your notes stay in this browser.</span>
+          <span>A support tool, not a scorecard.</span>
+        </footer>
+      </div>
+    </div>
+    <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+    <noscript><p class="noscript-note">This planner needs JavaScript enabled to save your pages in this browser.</p></noscript>
+  </body>
+</html>
