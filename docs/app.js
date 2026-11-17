@@ -1,5 +1,11 @@
 import { allPages, months, navigationGroups, pageDefinitions, weekDays } from "./data.js";
-import { createBackup, loadState, parseBackup, saveState } from "./storage.js";
+import { createBackup, loadState, parseBackup, saveState, storageDiagnostics } from "./storage.js";
+import {
+  parseMoney, formatMoney, daysBetween, unpaidBillsTotal as unpaidBillsTotalOf,
+  totalSpends as totalSpendsOf, computeStretch, perDayAmount, savingsProgress,
+  effectiveBillDue, totalDebts,
+} from "./money.js";
+import { detectEdition, canAdd, editionBannerHtml } from "./edition.js";
 
 const content = document.querySelector("#appContent");
 const sidebarNav = document.querySelector("#sidebarNav");
@@ -11,6 +17,9 @@ const toast = document.querySelector("#toast");
 let state = loadState();
 let toastTimer;
 let focusAfterRoute = false;
+if (!Array.isArray(state.debts)) state.debts = [];
+if (!Array.isArray(state.tasks)) state.tasks = [];
+if (!Array.isArray(state.quickCapture)) state.quickCapture = [];
 
 const escapeHtml = (value = "") => String(value).replace(/[&<>"']/g, (char) => ({
   "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
@@ -38,25 +47,11 @@ function ensureSection(id) {
   return state.sections[id];
 }
 
-function parseMoney(value) {
-  if (value == null || value === "") return null;
-  const cleaned = String(value).replace(/[^0-9.,-]/g, "").replace(/,/g, "");
-  if (!cleaned || cleaned === "-" || cleaned === "." || cleaned === "-.") return null;
-  const amount = Number.parseFloat(cleaned);
-  return Number.isFinite(amount) ? amount : null;
-}
 
-function formatMoney(amount) {
-  if (amount == null || !Number.isFinite(amount)) return "—";
-  return new Intl.NumberFormat(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 2 }).format(amount);
-}
+const edition = detectEdition();
 
-function daysBetween(fromIso, toIso) {
-  if (!fromIso || !toIso) return null;
-  const start = new Date(`${fromIso}T12:00:00`);
-  const end = new Date(`${toIso}T12:00:00`);
-  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) return null;
-  return Math.round((end.getTime() - start.getTime()) / 86_400_000);
+function moneyText(amount) {
+  return formatMoney(amount, undefined, state.settings.currency || "USD");
 }
 
 function relativeDueLabel(dueIso, today = localIsoDate()) {
@@ -70,65 +65,59 @@ function relativeDueLabel(dueIso, today = localIsoDate()) {
 }
 
 function unpaidBillsTotal() {
-  return state.bills.reduce((sum, bill) => {
-    if (bill.paid) return sum;
-    const amount = parseMoney(bill.amount);
-    return amount == null ? sum : sum + amount;
-  }, 0);
+  return unpaidBillsTotalOf(state.bills);
 }
 
 function totalSpends() {
-  return (state.spends || []).reduce((sum, spend) => {
-    const amount = parseMoney(spend.amount);
-    return amount == null ? sum : sum + amount;
-  }, 0);
+  return totalSpendsOf(state.spends);
 }
 
 function moneySummary() {
   const money = ensureSection("money");
   const today = localIsoDate();
-  const available = parseMoney(money.available);
-  const setAside = parseMoney(money.setAside) ?? 0;
-  const unpaid = unpaidBillsTotal();
   const payday = state.settings.nextPayday || "";
   const daysLeft = payday ? daysBetween(today, payday) : null;
-  const spent = totalSpends();
-  const left = available == null ? null : available - setAside - unpaid - spent;
-  const perDay = left != null && daysLeft != null && daysLeft > 0 ? left / daysLeft : null;
-  const unpaidCount = state.bills.filter((bill) => !bill.paid && (bill.name || bill.amount || bill.due)).length;
+  const stretch = computeStretch({
+    available: money.available,
+    setAside: money.setAside,
+    bills: state.bills,
+    spends: state.spends,
+    paycheck: state.settings.paycheckAmount,
+    includePaycheckInStretch: state.settings.includePaycheckInStretch,
+  });
+  const unpaidCount = state.bills.filter((bill) => !bill.paid && (bill.name || bill.amount || bill.due || bill.dueDay)).length;
   const nextBill = [...state.bills]
-    .map((bill, index) => ({ bill, index }))
-    .filter(({ bill }) => !bill.paid && bill.due)
-    .sort((a, b) => String(a.bill.due).localeCompare(String(b.bill.due)))[0];
+    .map((bill, index) => ({ bill, index, due: effectiveBillDue(bill, today) }))
+    .filter(({ bill, due }) => !bill.paid && due)
+    .sort((a, b) => String(a.due).localeCompare(String(b.due)))[0];
   return {
     today,
-    available,
-    setAside,
-    unpaid,
+    available: stretch.available ?? parseMoney(money.available),
+    setAside: stretch.setAside,
+    unpaid: stretch.unpaid,
     unpaidCount,
-    spent,
-    left,
+    spent: stretch.spent,
+    left: stretch.left,
     payday,
     daysLeft,
-    perDay,
+    perDay: perDayAmount(stretch.left, daysLeft),
     nextBill,
     label: state.settings.moneyLabel || "Left for this stretch",
+    paycheck: stretch.paycheck,
   };
 }
 
 function savingsSummary() {
   const money = ensureSection("money");
-  const target = parseMoney(money.savingsTarget);
-  const saved = parseMoney(money.savingsSaved) ?? 0;
   const name = String(money.savingsName || "").trim();
-  const by = money.savingsBy || "";
-  if (target == null && !name && saved === 0) return null;
-  const remaining = target == null ? null : Math.max(target - saved, 0);
-  const daysLeft = by ? daysBetween(localIsoDate(), by) : null;
-  const monthsLeft = daysLeft != null && daysLeft > 0 ? daysLeft / 30.44 : null;
-  const perMonth = remaining != null && monthsLeft != null && monthsLeft > 0 ? remaining / monthsLeft : null;
-  const progress = target != null && target > 0 ? Math.min(100, Math.max(0, (saved / target) * 100)) : 0;
-  return { name, target, saved, remaining, by, perMonth, progress };
+  const result = savingsProgress({
+    saved: money.savingsSaved,
+    target: money.savingsTarget,
+    byIso: money.savingsBy || "",
+    todayIso: localIsoDate(),
+  });
+  if (!result && !name) return null;
+  return { name, ...(result || { saved: 0, target: null, remaining: null, perMonth: null, progress: 0 }) };
 }
 
 function renderNavigation() {
@@ -251,7 +240,11 @@ function renderOverview() {
         <p class="eyebrow">IF YOU HAVE BEEN AWAY</p>
         <h2>Skip the catch-up.</h2>
         <p>Open today’s page and carry forward only what still matters. A restart can be one line.</p>
-        <a class="text-link" href="#/today">Start again gently <span aria-hidden="true">↗</span></a>
+        <div class="restart-actions">
+          <a class="button button-primary" href="#/today">Open Today</a>
+          <a class="button button-outline" href="#/capture">Brain dump</a>
+          <a class="button button-outline" href="#/help">Quick start</a>
+        </div>
       </article>
       <article class="gentle-card privacy-card">
         <p class="eyebrow">YOUR NOTES, YOUR DEVICE</p>
@@ -400,16 +393,16 @@ function renderMoneyHero(summary = moneySummary()) {
         ? `Payday is today (${escapeHtml(paydayLabel)})`
         : `Payday date has passed · update it when you can`;
   const perDayCopy = summary.perDay != null
-    ? ` · about ${formatMoney(summary.perDay)} / day if you smooth it`
+    ? ` · about ${moneyText(summary.perDay)} / day if you smooth it`
     : "";
   const nextBillCopy = summary.nextBill
     ? `${escapeHtml(summary.nextBill.bill.name || "A bill")} is next${summary.nextBill.bill.due ? ` · ${escapeHtml(relativeDueLabel(summary.nextBill.bill.due, summary.today))}` : ""}`
     : "No unpaid bills with dates yet";
   const workedOut = [
-    summary.available != null ? `Starts from ${formatMoney(summary.available)} available` : "Add money available to see a number",
-    summary.setAside ? `minus ${formatMoney(summary.setAside)} set aside` : null,
-    summary.unpaid ? `minus ${formatMoney(summary.unpaid)} still in unpaid bills` : null,
-    summary.spent ? `minus ${formatMoney(summary.spent)} logged spends` : null,
+    summary.available != null ? `Starts from ${moneyText(summary.available)} available` : "Add money available to see a number",
+    summary.setAside ? `minus ${moneyText(summary.setAside)} set aside` : null,
+    summary.unpaid ? `minus ${moneyText(summary.unpaid)} still in unpaid bills` : null,
+    summary.spent ? `minus ${moneyText(summary.spent)} logged spends` : null,
   ].filter(Boolean).join("; ");
 
   return `<section class="money-hero form-card tone-lavender" aria-labelledby="money-hero-title">
@@ -417,12 +410,12 @@ function renderMoneyHero(summary = moneySummary()) {
         <div>
           <label class="money-label-field" for="moneyLabel">What to call this number</label>
           <input id="moneyLabel" type="text" data-setting-text="moneyLabel" value="${escapeHtml(summary.label)}" maxlength="48" />
-          <h2 id="money-hero-title" class="money-hero-amount" data-money-left>${formatMoney(summary.left)}</h2>
+          <h2 id="money-hero-title" class="money-hero-amount" data-money-left>${moneyText(summary.left)}</h2>
           <p class="money-hero-sub" data-money-days>${daysCopy}${perDayCopy}</p>
         </div>
         <div class="money-hero-aside">
           <p class="eyebrow">Still to pay</p>
-          <p class="money-aside-figure" data-money-unpaid>${formatMoney(summary.unpaid)}</p>
+          <p class="money-aside-figure" data-money-unpaid>${moneyText(summary.unpaid)}</p>
           <p class="money-aside-note" data-money-next>${nextBillCopy}</p>
         </div>
       </div>
@@ -434,17 +427,44 @@ function renderMoneyHero(summary = moneySummary()) {
 }
 
 function renderPaydayField() {
+  const currencies = ["USD", "EUR", "GBP", "KES", "CAD", "AUD", "ZAR"];
+  const periods = [
+    ["until-payday", "Until next payday"],
+    ["weekly", "Weekly"],
+    ["biweekly", "Biweekly"],
+    ["twice-monthly", "Twice monthly"],
+    ["monthly", "Monthly"],
+  ];
   return `<div class="payday-row form-card tone-white">
-      <div class="field field-half">
+      <div class="field field-third">
         <label for="nextPayday">Next payday</label>
         <input id="nextPayday" type="date" data-setting="nextPayday" value="${escapeHtml(state.settings.nextPayday || "")}" />
-        <span class="field-hint">The day money actually lands. The stretch number counts toward this.</span>
+        <span class="field-hint">Actual landing date. Expected pay is not added to available unless you opt in below.</span>
+      </div>
+      <div class="field field-third">
+        <label for="paycheckAmount">Usual paycheck (expected)</label>
+        <input id="paycheckAmount" type="text" inputmode="decimal" data-setting-text="paycheckAmount" value="${escapeHtml(state.settings.paycheckAmount || "")}" placeholder="Optional" />
+      </div>
+      <div class="field field-third">
+        <label for="currency">Currency display</label>
+        <select id="currency" data-setting="currency">${currencies.map((c) => `<option value="${c}"${(state.settings.currency || "USD") === c ? " selected" : ""}>${c}</option>`).join("")}</select>
+      </div>
+      <div class="field field-third">
+        <label for="budgetPeriod">Budget period</label>
+        <select id="budgetPeriod" data-setting="budgetPeriod">${periods.map(([v,l]) => `<option value="${v}"${(state.settings.budgetPeriod || "until-payday") === v ? " selected" : ""}>${l}</option>`).join("")}</select>
       </div>
       <div class="field field-half">
-        <label for="showSavings">Savings card</label>
+        <label class="toggle-line" for="includePaycheckInStretch">
+          <input id="includePaycheckInStretch" type="checkbox" data-setting-bool="includePaycheckInStretch"${state.settings.includePaycheckInStretch ? " checked" : ""} />
+          <span>Add expected paycheck into stretch total (off by default — avoids counting money that has not arrived)</span>
+        </label>
         <label class="toggle-line" for="showSavings">
           <input id="showSavings" type="checkbox" data-setting-bool="showSavings"${state.settings.showSavings !== false ? " checked" : ""} />
-          <span>Show optional savings progress on this page</span>
+          <span>Show savings progress</span>
+        </label>
+        <label class="toggle-line" for="showDebt">
+          <input id="showDebt" type="checkbox" data-setting-bool="showDebt"${state.settings.showDebt ? " checked" : ""} />
+          <span>Show optional debt tracking</span>
         </label>
       </div>
     </div>`;
@@ -460,17 +480,23 @@ function renderBillList() {
     });
   const summary = moneySummary();
   const summaryLine = summary.unpaidCount
-    ? `${summary.unpaidCount} still to pay · ${formatMoney(summary.unpaid)}${summary.nextBill ? ` · next: ${escapeHtml(summary.nextBill.bill.name || "bill")} (${escapeHtml(relativeDueLabel(summary.nextBill.bill.due, today))})` : ""}`
+    ? `${summary.unpaidCount} still to pay · ${moneyText(summary.unpaid)}${summary.nextBill ? ` · next: ${escapeHtml(summary.nextBill.bill.name || "bill")} (${escapeHtml(relativeDueLabel(summary.nextBill.bill.due, today))})` : ""}`
     : "No unpaid bills right now. Add one only if it helps.";
 
   const rows = ordered.map(({ bill, index }) => {
-    const rel = bill.due ? relativeDueLabel(bill.due, today) : "";
+    const due = effectiveBillDue(bill, today) || bill.due || "";
+    const rel = due ? relativeDueLabel(due, today) : "";
     return `<div class="bill-row${bill.paid ? " is-paid" : ""}" data-bill-row="${index}">
       <div class="bill-due-wrap">
         <label class="sr-only" for="bill-due-${index}">Due date for bill ${index + 1}</label>
         <input id="bill-due-${index}" type="date" data-list="bills" data-index="${index}" data-field="due" value="${escapeHtml(bill.due || "")}" />
         ${rel ? `<span class="bill-relative">${escapeHtml(rel)}</span>` : ""}
       </div>
+      <label class="sr-only" for="bill-recurring-${index}">Repeat</label>
+      <select id="bill-recurring-${index}" data-list="bills" data-index="${index}" data-field="recurring" aria-label="Repeat bill ${index + 1}">
+        <option value="once"${(bill.recurring || "once") === "once" ? " selected" : ""}>Once</option>
+        <option value="monthly"${bill.recurring === "monthly" ? " selected" : ""}>Monthly</option>
+      </select>
       <label class="sr-only" for="bill-name-${index}">Bill name ${index + 1}</label>
       <input id="bill-name-${index}" type="text" data-list="bills" data-index="${index}" data-field="name" value="${escapeHtml(bill.name || "")}" placeholder="Bill / what for" />
       <label class="sr-only" for="bill-amount-${index}">Amount for bill ${index + 1}</label>
@@ -483,7 +509,7 @@ function renderBillList() {
   return `<section class="form-card tone-white" aria-labelledby="bill-title">
     <div class="form-card-heading"><span class="tone-mark" aria-hidden="true"></span><h2 id="bill-title">Bills · soonest first</h2></div>
     <p class="card-intro" data-bill-summary>${summaryLine}</p>
-    <div class="bill-table-head" aria-hidden="true"><span>DUE</span><span>BILL / WHAT FOR</span><span>amount</span><span></span><span></span></div>
+    <div class="bill-table-head" aria-hidden="true"><span>DUE</span><span>REPEAT</span><span>BILL</span><span>AMOUNT</span><span></span><span></span></div>
     <div class="bill-list">${rows || '<p class="empty-inline">No bills added. Add one only if it helps.</p>'}</div>
     <button class="button button-add" type="button" data-action="add-bill"><span aria-hidden="true">+</span> Add a bill</button>
   </section>`;
@@ -530,7 +556,7 @@ function renderSavingsCard() {
   const summary = savingsSummary();
   const bar = summary && summary.target != null
     ? `<div class="savings-progress" aria-hidden="true"><span style="width:${summary.progress.toFixed(1)}%"></span></div>
-       <p class="savings-meta">${formatMoney(summary.saved)}${summary.target != null ? ` of ${formatMoney(summary.target)}` : ""}${summary.remaining != null ? ` · ${formatMoney(summary.remaining)} to go` : ""}${summary.perMonth != null ? ` · about ${formatMoney(summary.perMonth)} / month` : ""}</p>`
+       <p class="savings-meta">${moneyText(summary.saved)}${summary.target != null ? ` of ${moneyText(summary.target)}` : ""}${summary.remaining != null ? ` · ${moneyText(summary.remaining)} to go` : ""}${summary.perMonth != null ? ` · about ${moneyText(summary.perMonth)} / month` : ""}</p>`
     : `<p class="card-intro">A soft target only. Leave blank if numbers do not help right now.</p>`;
   return `<section class="form-card tone-butter" aria-labelledby="savings-title">
     <div class="form-card-heading"><span class="tone-mark" aria-hidden="true"></span><h2 id="savings-title">${escapeHtml(savingsGroup.title)}</h2></div>
@@ -551,6 +577,7 @@ function renderMoney() {
       ${renderSpendLog()}
       ${groupHtml("money", page.groups[1], values)}
       ${renderSavingsCard()}
+      ${renderDebtList()}
     </div>`;
 }
 
@@ -559,7 +586,7 @@ function renderTodayMoneyChip() {
   const nudgeDone = state.settings.spendNudgeDone === summary.today;
   const leftCopy = summary.left == null
     ? "Add available money on Money & bills when you want a stretch number."
-    : `${escapeHtml(summary.label)} ≈ ${formatMoney(summary.left)}${summary.perDay != null ? ` · ~${formatMoney(summary.perDay)}/day` : ""}`;
+    : `${escapeHtml(summary.label)} ≈ ${moneyText(summary.left)}${summary.perDay != null ? ` · ~${moneyText(summary.perDay)}/day` : ""}`;
   return `<section class="today-money-chip form-card tone-sage" aria-label="Money glance">
       <div class="today-money-copy">
         <p class="eyebrow">Money glance</p>
@@ -577,7 +604,7 @@ function renderToday() {
   const page = pageDefinitions.today;
   const values = ensureSection("today");
   return `<div class="page-heading"><p class="eyebrow">${page.eyebrow}</p><h1 tabindex="-1">${page.title}</h1><p class="page-intro">${page.intro}</p></div>
-    <div class="page-stack">${renderTodayMoneyChip()}${page.groups.map((group) => groupHtml("today", group, values)).join("")}</div>`;
+    <div class="page-stack">${renderTodayMoneyChip()}${renderTodayTasks()}${page.groups.map((group) => groupHtml("today", group, values)).join("")}</div>`;
 }
 
 function renderProjectList() {
@@ -675,7 +702,7 @@ function renderGoals() {
   const savingsNote = savings
     ? `<aside class="form-card tone-sage goals-savings-note">
         <p class="eyebrow">From Money &amp; bills</p>
-        <p class="savings-meta">${escapeHtml(savings.name || "Savings")}${savings.target != null ? ` · ${formatMoney(savings.saved)} of ${formatMoney(savings.target)}` : ""}${savings.remaining != null ? ` · ${formatMoney(savings.remaining)} to go` : ""}</p>
+        <p class="savings-meta">${escapeHtml(savings.name || "Savings")}${savings.target != null ? ` · ${moneyText(savings.saved)} of ${moneyText(savings.target)}` : ""}${savings.remaining != null ? ` · ${moneyText(savings.remaining)} to go` : ""}</p>
         <a class="text-link" href="#/money">Edit savings on Money &amp; bills <span aria-hidden="true">↗</span></a>
       </aside>`
     : "";
@@ -683,8 +710,143 @@ function renderGoals() {
     <div class="page-stack">${groupHtml("goals", page.groups[0], ensureSection("goals"))}${savingsNote}${renderMilestones()}</div>`;
 }
 
+
+function renderEditionBanner() {
+  const host = document.querySelector("#editionBanner");
+  if (host) host.innerHTML = editionBannerHtml(edition);
+}
+
+function renderQuickCaptureList() {
+  const host = document.querySelector("#quickCaptureList");
+  if (!host) return;
+  const items = state.quickCapture || [];
+  if (!items.length) {
+    host.hidden = true;
+    host.innerHTML = "";
+    return;
+  }
+  host.hidden = false;
+  host.innerHTML = items.slice(0, 8).map((item, index) => `<div class="quick-capture-item">
+    <input type="checkbox" data-action="promote-capture" data-index="${index}" aria-label="Move capture to today tasks" title="Move to today tasks" />
+    <span>${escapeHtml(item.text || "")}</span>
+    <button type="button" class="icon-button" data-action="remove-capture" data-index="${index}" aria-label="Remove capture">×</button>
+  </div>`).join("");
+}
+
+function renderDebtList() {
+  if (!state.settings.showDebt) return "";
+  const rows = (state.debts || []).map((debt, index) => `<div class="debt-row">
+    <input type="text" data-list="debts" data-index="${index}" data-field="name" value="${escapeHtml(debt.name || "")}" placeholder="Debt / balance name" aria-label="Debt name ${index + 1}" />
+    <input type="text" inputmode="decimal" data-list="debts" data-index="${index}" data-field="balance" value="${escapeHtml(debt.balance || "")}" placeholder="Balance" aria-label="Debt balance ${index + 1}" />
+    <input type="text" inputmode="decimal" data-list="debts" data-index="${index}" data-field="payment" value="${escapeHtml(debt.payment || "")}" placeholder="Payment" aria-label="Debt payment ${index + 1}" />
+    <button type="button" class="icon-button remove-row" data-action="remove-debt" data-index="${index}" aria-label="Remove debt ${index + 1}">×</button>
+  </div>`).join("");
+  return `<section class="form-card tone-peach" aria-labelledby="debt-title">
+    <div class="form-card-heading"><span class="tone-mark" aria-hidden="true"></span><h2 id="debt-title">Optional debt tracking</h2></div>
+    <p class="card-intro">Balances are informational. Total still owed: <strong>${moneyText(totalDebts(state.debts))}</strong>. Not advice.</p>
+    <div class="debt-list">${rows || '<p class="empty-inline">No debts listed.</p>'}</div>
+    <button class="button button-add" type="button" data-action="add-debt"><span aria-hidden="true">+</span> Add a debt</button>
+  </section>`;
+}
+
+function renderTodayTasks() {
+  const rows = (state.tasks || []).map((task, index) => `<div class="task-row">
+    <input type="checkbox" data-list="tasks" data-index="${index}" data-field="done"${task.done ? " checked" : ""} aria-label="Done ${index + 1}" />
+    <input type="text" data-list="tasks" data-index="${index}" data-field="text" value="${escapeHtml(task.text || "")}" placeholder="A small task" />
+    <input type="date" data-list="tasks" data-index="${index}" data-field="due" value="${escapeHtml(task.due || "")}" aria-label="Due ${index + 1}" />
+    <button type="button" class="icon-button" data-action="remove-task" data-index="${index}" aria-label="Remove task">×</button>
+  </div>`).join("");
+  const done = (state.tasks || []).filter((t) => t.done).length;
+  const total = (state.tasks || []).length;
+  return `<section class="form-card tone-mint" aria-labelledby="task-title">
+    <div class="form-card-heading"><span class="tone-mark" aria-hidden="true"></span><h2 id="task-title">Today’s checklist</h2>
+      <span class="progress-pill">${done}/${total || 0} done</span></div>
+    <p class="card-intro">Optional tiny tasks. Blank is fine.</p>
+    <div class="task-list">${rows || '<p class="empty-inline">No checklist items yet.</p>'}</div>
+    <button class="button button-add" type="button" data-action="add-task"><span aria-hidden="true">+</span> Add a task</button>
+  </section>`;
+}
+
+function maybeNotifyDueBills() {
+  if (!state.settings.remindersEnabled || Notification.permission !== "granted") return;
+  const today = localIsoDate();
+  if (state.settings.lastReminderDate === today) return;
+  const dueToday = state.bills.filter((bill) => !bill.paid && effectiveBillDue(bill, today) === today);
+  if (!dueToday.length) return;
+  const names = dueToday.map((b) => b.name || "A bill").slice(0, 3).join(", ");
+  new Notification("Calm ADHD Planner", { body: `Due today: ${names}` });
+  state.settings.lastReminderDate = today;
+  persist();
+}
+
+async function toggleReminders() {
+  if (!("Notification" in window)) {
+    announce("This browser does not support notifications.");
+    return;
+  }
+  if (!state.settings.remindersEnabled) {
+    const permission = await Notification.requestPermission();
+    if (permission !== "granted") {
+      announce("Reminders need notification permission.");
+      return;
+    }
+    state.settings.remindersEnabled = true;
+    persist();
+    announce("Reminders on — we’ll nudge for bills due today when you open the planner.");
+    maybeNotifyDueBills();
+  } else {
+    state.settings.remindersEnabled = false;
+    persist();
+    announce("Reminders off.");
+  }
+}
+
+
+function renderHelp() {
+  const page = pageDefinitions.help;
+  return `<div class="page-heading"><p class="eyebrow">${page.eyebrow}</p><h1 tabindex="-1">${page.title}</h1><p class="page-intro">${page.intro}</p></div>
+    <div class="page-stack">
+      <section class="form-card tone-lavender"><div class="form-card-heading"><span class="tone-mark"></span><h2>1 · Capture</h2></div><p class="card-intro">Write the thought, task, or date before organizing. Use Quick capture at the bottom of any page.</p></section>
+      <section class="form-card tone-mint"><div class="form-card-heading"><span class="tone-mark"></span><h2>2 · Choose</h2></div><p class="card-intro">Pick up to three priorities on Today. One thing is also a valid plan.</p></section>
+      <section class="form-card tone-peach"><div class="form-card-heading"><span class="tone-mark"></span><h2>3 · Begin</h2></div><p class="card-intro">Write the smallest visible next action, then start there.</p></section>
+      <section class="form-card tone-sand"><div class="form-card-heading"><span class="tone-mark"></span><h2>If you have been away</h2></div><p class="card-intro">Skip the catch-up. Open Today and carry forward only what still matters.</p>
+        <div class="restart-actions"><a class="button button-primary" href="#/today">Open Today</a><a class="button button-outline" href="#/capture">Brain dump</a><a class="button button-outline" href="#/backup">Backup &amp; restore</a></div>
+      </section>
+      <p class="helper-note">This is an ADHD-friendly planner companion — not medical treatment and not a guarantee of symptom change. Printable expanded PDFs are a separate product (20 core sheets + repeats, not 225 unique layouts).</p>
+    </div>`;
+}
+
+function renderBackupPage() {
+  const page = pageDefinitions.backup;
+  const diag = storageDiagnostics();
+  const counts = {
+    bills: (state.bills || []).length,
+    spends: (state.spends || []).length,
+    projects: (state.projects || []).length,
+    tasks: (state.tasks || []).length,
+  };
+  return `<div class="page-heading"><p class="eyebrow">${page.eyebrow}</p><h1 tabindex="-1">${page.title}</h1><p class="page-intro">${page.intro}</p></div>
+    <div class="page-stack">
+      <section class="form-card tone-white">
+        <div class="form-card-heading"><span class="tone-mark"></span><h2>This browser right now</h2></div>
+        <p class="card-intro">Storage ${diag.ok ? "looks available" : "may be blocked"} · ${counts.bills} bills · ${counts.spends} spends · ${counts.projects} projects · ${counts.tasks} tasks${state.savedAt ? ` · last saved ${escapeHtml(state.savedAt)}` : ""}.</p>
+        <p class="helper-note">Nothing is uploaded to a planner account. Safari and some browsers may clear site data after inactivity — keep JSON backups somewhere private.</p>
+        <div class="restart-actions">
+          <button class="button button-primary" type="button" data-action="download-backup">Download JSON backup</button>
+          <button class="button button-outline" type="button" data-action="pick-restore">Choose backup to restore</button>
+        </div>
+      </section>
+      <section class="form-card tone-lavender">
+        <div class="form-card-heading"><span class="tone-mark"></span><h2>Safe restore</h2></div>
+        <p class="card-intro">Restore validates the file, shows a short summary, and asks for confirmation before replacing data in this browser. Invalid files are rejected.</p>
+      </section>
+    </div>`;
+}
+
 function renderView(id) {
   if (id === "overview") return renderOverview();
+  if (id === "help") return renderHelp();
+  if (id === "backup") return renderBackupPage();
   if (id === "today") return renderToday();
   if (id === "month") return renderMonth();
   if (id === "year") return renderYear();
@@ -700,9 +862,9 @@ function refreshMoneyHeroDom() {
   if (activePageId() !== "money" && activePageId() !== "today") return;
   const summary = moneySummary();
   const leftEl = document.querySelector("[data-money-left]");
-  if (leftEl) leftEl.textContent = formatMoney(summary.left);
+  if (leftEl) leftEl.textContent = moneyText(summary.left);
   const unpaidEl = document.querySelector("[data-money-unpaid]");
-  if (unpaidEl) unpaidEl.textContent = formatMoney(summary.unpaid);
+  if (unpaidEl) unpaidEl.textContent = moneyText(summary.unpaid);
   const daysEl = document.querySelector("[data-money-days]");
   if (daysEl) {
     const paydayLabel = summary.payday
@@ -716,7 +878,7 @@ function refreshMoneyHeroDom() {
           ? `Payday is today (${paydayLabel})`
           : "Payday date has passed · update it when you can";
     const perDayCopy = summary.perDay != null
-      ? ` · about ${formatMoney(summary.perDay)} / day if you smooth it`
+      ? ` · about ${moneyText(summary.perDay)} / day if you smooth it`
       : "";
     daysEl.textContent = `${daysCopy}${perDayCopy}`;
   }
@@ -729,14 +891,14 @@ function refreshMoneyHeroDom() {
   const billSummary = document.querySelector("[data-bill-summary]");
   if (billSummary) {
     billSummary.textContent = summary.unpaidCount
-      ? `${summary.unpaidCount} still to pay · ${formatMoney(summary.unpaid)}${summary.nextBill ? ` · next: ${summary.nextBill.bill.name || "bill"} (${relativeDueLabel(summary.nextBill.bill.due, summary.today)})` : ""}`
+      ? `${summary.unpaidCount} still to pay · ${moneyText(summary.unpaid)}${summary.nextBill ? ` · next: ${summary.nextBill.bill.name || "bill"} (${relativeDueLabel(summary.nextBill.bill.due, summary.today)})` : ""}`
       : "No unpaid bills right now. Add one only if it helps.";
   }
   const figure = document.querySelector(".today-money-figure");
   if (figure) {
     figure.textContent = summary.left == null
       ? "Add available money on Money & bills when you want a stretch number."
-      : `${summary.label} ≈ ${formatMoney(summary.left)}${summary.perDay != null ? ` · ~${formatMoney(summary.perDay)}/day` : ""}`;
+      : `${summary.label} ≈ ${moneyText(summary.left)}${summary.perDay != null ? ` · ~${moneyText(summary.perDay)}/day` : ""}`;
   }
 }
 
@@ -767,9 +929,12 @@ function renderPage({ moveFocus = false } = {}) {
   const id = activePageId();
   updateNavigation(id);
   todayLabel.textContent = readableDate();
+  renderEditionBanner();
   content.innerHTML = renderView(id);
   content.setAttribute("aria-busy", "false");
   document.title = `${pageDefinitions[id]?.title || "Overview"} · The Calm ADHD Planner`;
+  renderQuickCaptureList();
+  maybeNotifyDueBills();
   if (moveFocus) {
     requestAnimationFrame(() => content.querySelector("h1")?.focus({ preventScroll: true }));
   }
@@ -905,8 +1070,32 @@ function handleClick(event) {
   const button = target.closest("[data-action]");
   if (button) {
     const index = Number(button.dataset.index);
-    if (button.dataset.action === "add-bill") state.bills.push({ id: makeId(), due: "", name: "", amount: "", paid: false });
+    if (button.dataset.action === "add-bill") {
+      if (!canAdd(edition, "bills", state.bills.length)) { announce("Demo limit reached for bills. Full edition removes caps."); return; }
+      state.bills.push({ id: makeId(), due: "", name: "", amount: "", paid: false, recurring: "once", dueDay: "" });
+    }
     if (button.dataset.action === "remove-bill") removeAt(state.bills, index);
+    if (button.dataset.action === "add-debt") {
+      if (!canAdd(edition, "debts", state.debts.length)) { announce("Demo limit reached for debts."); return; }
+      state.debts.push({ id: makeId(), name: "", balance: "", payment: "" });
+    }
+    if (button.dataset.action === "remove-debt") removeAt(state.debts, index);
+    if (button.dataset.action === "add-task") {
+      if (!canAdd(edition, "tasks", state.tasks.length)) { announce("Demo limit reached for tasks."); return; }
+      state.tasks.push({ id: makeId(), text: "", due: localIsoDate(), done: false });
+    }
+    if (button.dataset.action === "remove-task") removeAt(state.tasks, index);
+    if (button.dataset.action === "remove-capture") removeAt(state.quickCapture, index);
+    if (button.dataset.action === "promote-capture") {
+      const item = state.quickCapture[index];
+      if (item) {
+        state.tasks.push({ id: makeId(), text: item.text || "", due: localIsoDate(), done: false });
+        removeAt(state.quickCapture, index);
+        announce("Moved into today’s checklist.");
+      }
+    }
+    if (button.dataset.action === "download-backup") { downloadBackup(); return; }
+    if (button.dataset.action === "pick-restore") { importFile.click(); return; }
     if (button.dataset.action === "toggle-bill-paid") {
       if (state.bills[index]) state.bills[index].paid = !state.bills[index].paid;
     }
@@ -967,7 +1156,7 @@ function handleSubmit(event) {
 }
 
 function downloadBackup() {
-  const backup = createBackup(state);
+  const backup = createBackup(state, { edition });
   const blob = new Blob([JSON.stringify(backup, null, 2)], { type: "application/json" });
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement("a");
@@ -984,9 +1173,18 @@ async function restoreBackup(file) {
   if (!file) return;
   try {
     const restored = parseBackup(await file.text());
-    const replace = window.confirm("Restore this backup? It will replace the planner data saved in this browser.");
+    const summary = [
+      `${(restored.bills || []).length} bills`,
+      `${(restored.spends || []).length} spends`,
+      `${(restored.projects || []).length} projects`,
+      `version ${restored.version}`,
+    ].join(", ");
+    const replace = window.confirm(`Restore this backup and replace data in this browser?\n\nIncoming: ${summary}\n\nDownload a backup first if you are unsure.`);
     if (!replace) return;
     state = restored;
+    if (!Array.isArray(state.debts)) state.debts = [];
+    if (!Array.isArray(state.tasks)) state.tasks = [];
+    if (!Array.isArray(state.quickCapture)) state.quickCapture = [];
     persist();
     renderPage();
     announce("Backup restored in this browser.");
@@ -1016,3 +1214,27 @@ mobileNav.addEventListener("change", () => setRoute(mobileNav.value));
 document.querySelector("#exportButton").addEventListener("click", downloadBackup);
 document.querySelector("#importButton").addEventListener("click", () => importFile.click());
 importFile.addEventListener("change", () => restoreBackup(importFile.files?.[0]));
+
+document.querySelector("#reminderButton")?.addEventListener("click", () => toggleReminders());
+document.querySelector("#quickCaptureForm")?.addEventListener("submit", (event) => {
+  event.preventDefault();
+  const input = document.querySelector("#quickCaptureInput");
+  const text = String(input?.value || "").trim();
+  if (!text) return;
+  if (!canAdd(edition, "quickCapture", state.quickCapture.length)) {
+    announce("Demo limit reached for quick capture.");
+    return;
+  }
+  state.quickCapture.unshift({ id: makeId(), text, at: new Date().toISOString() });
+  if (input) input.value = "";
+  persist();
+  renderQuickCaptureList();
+  announce("Parked in quick capture.");
+});
+
+if ("serviceWorker" in navigator) {
+  navigator.serviceWorker.register("./sw.js").catch(() => {
+    /* Offline shell unavailable — ignore silently */
+  });
+}
+

@@ -1,12 +1,18 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-edition="demo">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="theme-color" content="#f7f5f3" />
-    <meta name="description" content="A calm, flexible planner for choosing one useful next step at a time." />
+    <meta name="theme-color" content="#c9bddb" />
+    <meta name="description" content="A calm, flexible planner for choosing one useful next step at a time. Soft lavender, mint, peach, and sand — companion to the printable Calm ADHD Planner." />
+    <meta name="color-scheme" content="light" />
     <title>The Calm ADHD Planner</title>
     <link rel="icon" href="./favicon.svg" type="image/svg+xml" />
+    <link rel="manifest" href="./manifest.webmanifest" />
+    <link rel="apple-touch-icon" href="./favicon.svg" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,650&family=Source+Sans+3:wght@400;600;700&display=swap" rel="stylesheet" />
     <link rel="stylesheet" href="./styles.css" />
     <script type="module" src="./app.js"></script>
   </head>
@@ -38,6 +44,7 @@
           <div class="topbar-date"><span class="status-dot" aria-hidden="true"></span><span id="todayLabel"></span></div>
           <div class="topbar-actions">
             <span id="saveStatus" class="save-status" role="status" aria-live="polite">Saved on this device</span>
+            <button id="reminderButton" class="button button-quiet" type="button" title="Optional due reminders for today">Reminders</button>
             <button id="exportButton" class="button button-quiet" type="button">Download backup</button>
             <button id="importButton" class="button button-outline" type="button">Restore backup</button>
             <input id="importFile" class="sr-only" type="file" accept="application/json,.json" />
@@ -45,12 +52,21 @@
         </header>
 
         <main id="mainContent" class="main-content" tabindex="-1">
+          <div id="editionBanner"></div>
           <div id="appContent" aria-live="polite" aria-busy="true">
             <p class="loading-message">Opening your planner…</p>
           </div>
+          <section class="quick-capture-dock" aria-label="Quick capture">
+            <form id="quickCaptureForm">
+              <label class="sr-only" for="quickCaptureInput">Quick capture</label>
+              <input id="quickCaptureInput" name="text" type="text" placeholder="Quick capture — park a thought without sorting" autocomplete="off" />
+              <button class="button button-primary" type="submit">Park it</button>
+            </form>
+            <div id="quickCaptureList" class="quick-capture-list" hidden></div>
+          </section>
         </main>
         <footer class="app-footer">
-          <span>Your notes stay in this browser.</span>
+          <span>Your notes stay in this browser. Offline shell works after first visit when installed or cached.</span>
           <span>A support tool, not a scorecard.</span>
         </footer>
       </div>

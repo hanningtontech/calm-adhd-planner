@@ -1,7 +1,11 @@
 export const navigationGroups = [
   {
     label: "Start",
-    items: [{ id: "overview", title: "Overview", short: "Home" }],
+    items: [
+      { id: "overview", title: "Overview", short: "Home" },
+      { id: "help", title: "Quick start & help", short: "Help" },
+      { id: "backup", title: "Backup & restore", short: "Backup" },
+    ],
   },
   {
     label: "Plan",
@@ -57,6 +61,18 @@ export const months = [
 ];
 
 export const pageDefinitions = {
+  help: {
+    eyebrow: "QUICK START",
+    title: "Start small. Restart any time.",
+    intro: "This is a support tool, not a test. Capture → choose up to three priorities → begin one tiny action.",
+    groups: [],
+  },
+  backup: {
+    eyebrow: "YOUR DATA",
+    title: "Backup & restore",
+    intro: "Entries stay in this browser only. A JSON backup is the copy that survives clearing storage or switching devices.",
+    groups: [],
+  },
   today: {
     eyebrow: "DAILY PAGE",
     title: "Today, one step at a time",
